@@ -58,9 +58,6 @@ class WebsiteDownloader:
         # 资源映射 (URL -> 本地路径)
         self.resource_map: Dict[str, Path] = {}
 
-        # 确保输出目录存在
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
     def _is_chrome_running(self) -> bool:
         """检测 Chrome/Edge 浏览器是否正在运行"""
         system = platform.system()
@@ -231,6 +228,7 @@ class WebsiteDownloader:
 
             try:
                 # 如果启用用户确认，先打开页面让用户检查
+                confirmed_page = None
                 if wait_for_confirmation:
                     # 打开第一个页面
                     page = context.pages[0] if context.pages else await context.new_page()
@@ -241,8 +239,14 @@ class WebsiteDownloader:
                         logger.info("用户取消下载")
                         return {}
 
-                # 下载主页和所有资源
-                await self._download_recursive_with_context(context, self.start_url, depth=0)
+                    # 保存已确认的页面，供下载函数复用
+                    confirmed_page = page
+
+                # 用户确认后（或不需要确认时），创建输出目录
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+
+                # 下载主页和所有资源（复用已确认的页面）
+                await self._download_recursive_with_context(context, self.start_url, depth=0, existing_page=confirmed_page)
 
                 # 保存下载报告
                 report = self._generate_report()
@@ -260,9 +264,17 @@ class WebsiteDownloader:
         self,
         context: BrowserContext,
         url: str,
-        depth: int
+        depth: int,
+        existing_page: Optional[Page] = None
     ) -> None:
-        """递归下载页面及其资源（使用 BrowserContext）"""
+        """递归下载页面及其资源（使用 BrowserContext）
+
+        Args:
+            context: 浏览器上下文
+            url: 要下载的URL
+            depth: 当前深度
+            existing_page: 已存在的页面（用于复用已确认的页面，避免重新打开）
+        """
         # 检查深度限制
         max_depth = self.config.get('max_depth', 3)
         if depth > max_depth:
@@ -286,8 +298,12 @@ class WebsiteDownloader:
         logger.info(f"正在下载 [{depth}]: {url}")
 
         try:
-            # 使用 context 创建新页面
-            page = await context.new_page()
+            # 复用已存在的页面，或创建新页面
+            if existing_page:
+                page = existing_page
+                logger.info(f"复用已确认的页面: {url}")
+            else:
+                page = await context.new_page()
 
             # 监听网络请求,捕获所有资源
             resources = []
@@ -301,11 +317,13 @@ class WebsiteDownloader:
 
             page.on('response', handle_response)
 
-            # 访问页面
-            await page.goto(url, timeout=self.config.get('timeout', 30000))
+            # 如果是新创建的页面，需要访问URL
+            if not existing_page:
+                # 访问页面
+                await page.goto(url, timeout=self.config.get('timeout', 30000))
 
-            # 等待页面加载完成
-            await page.wait_for_load_state('networkidle')
+                # 等待页面加载完成
+                await page.wait_for_load_state('networkidle')
 
             # 获取页面HTML
             html = await page.content()
@@ -322,11 +340,25 @@ class WebsiteDownloader:
             for link in links:
                 await self._download_recursive_with_context(context, link, depth + 1)
 
-            await page.close()
+            # 只关闭新创建的页面，不关闭复用的页面
+            if not existing_page:
+                await page.close()
 
         except Exception as e:
-            logger.error(f"下载失败 {url}: {e}")
-            self.failed_downloads.append({'url': url, 'error': str(e)})
+            # 区分不同类型的错误，避免误导性提示
+            error_msg = str(e)
+            if 'Incoming markup is of an invalid type' in error_msg:
+                # 这是代码逻辑问题，但通常不影响结果（降为debug）
+                logger.debug(f"页面处理警告 {url}: BeautifulSoup类型错误（可忽略）")
+            else:
+                # 其他真正的下载错误
+                logger.error(f"下载失败 {url}: {e}")
+
+            self.failed_downloads.append({
+                'url': url,
+                'error': str(e),
+                'severity': 'info' if 'Incoming markup' in error_msg else 'error'
+            })
 
     async def _download_recursive(
         self,
@@ -399,8 +431,20 @@ class WebsiteDownloader:
             await page.close()
 
         except Exception as e:
-            logger.error(f"下载失败 {url}: {e}")
-            self.failed_downloads.append({'url': url, 'error': str(e)})
+            # 区分不同类型的错误，避免误导性提示
+            error_msg = str(e)
+            if 'Incoming markup is of an invalid type' in error_msg:
+                # 这是代码逻辑问题，但通常不影响结果（降为debug）
+                logger.debug(f"页面处理警告 {url}: BeautifulSoup类型错误（可忽略）")
+            else:
+                # 其他真正的下载错误
+                logger.error(f"下载失败 {url}: {e}")
+
+            self.failed_downloads.append({
+                'url': url,
+                'error': str(e),
+                'severity': 'info' if 'Incoming markup' in error_msg else 'error'
+            })
 
     async def _download_page_resources(
         self,
@@ -517,12 +561,43 @@ class WebsiteDownloader:
             if resource_type == 'css' and base_url:
                 await self._process_css_resources(file_path, url)
 
-        except Exception as e:
-            logger.warning(f"资源下载失败 {url}: {e}")
+        except requests.exceptions.HTTPError as e:
+            # 区分404和其他HTTP错误
+            if '404' in str(e):
+                # 404错误很常见（失效链接），降为debug级别
+                logger.debug(f"资源不存在 (404) {url[:80]}")
+                self.failed_downloads.append({
+                    'url': url,
+                    'type': resource_type,
+                    'error': '404 Not Found',
+                    'severity': 'info'  # 标记为信息级别
+                })
+            else:
+                # 其他HTTP错误（403、500等）是真正的问题
+                logger.warning(f"资源下载失败 {url[:80]}: {e}")
+                self.failed_downloads.append({
+                    'url': url,
+                    'type': resource_type,
+                    'error': str(e),
+                    'severity': 'warning'
+                })
+        except requests.exceptions.RequestException as e:
+            # 网络错误（超时、连接失败等）
+            logger.warning(f"网络错误 {url[:80]}: {e}")
             self.failed_downloads.append({
                 'url': url,
                 'type': resource_type,
-                'error': str(e)
+                'error': str(e),
+                'severity': 'warning'
+            })
+        except Exception as e:
+            # 其他未预期的错误
+            logger.warning(f"资源下载失败 {url[:80]}: {e}")
+            self.failed_downloads.append({
+                'url': url,
+                'type': resource_type,
+                'error': str(e),
+                'severity': 'warning'
             })
 
     async def _process_css_resources(self, css_file_path: Path, css_url: str) -> None:

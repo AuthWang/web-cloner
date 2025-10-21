@@ -83,8 +83,9 @@ def cli():
 @click.option('--confirm/--no-confirm', default=True, help='下载前等待用户确认页面（默认开启）')
 @click.option('--chrome-data-dir', default=None, help='指定 Chrome 用户数据目录（默认自动检测）')
 @click.option('--chrome-mode', type=click.Choice(['system', 'playwright', 'temp']), default='playwright', help='Chrome 数据模式: system(需关闭Chrome)/playwright(推荐)/temp(临时)')
+@click.option('--use-browser-data', is_flag=True, help='使用系统浏览器数据(登录状态、Cookies等)')
 @click.option('--static-only', is_flag=True, help='强制生成纯静态项目(仅HTML+CSS,移除所有JS)')
-def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai, headless, confirm, chrome_data_dir, chrome_mode, static_only):
+def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai, headless, confirm, chrome_data_dir, chrome_mode, use_browser_data, static_only):
     """
     完整复刻网站
 
@@ -103,11 +104,6 @@ def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai
     project_dir = PROJECTS_DIR / output_name
     report_dir = REPORTS_DIR / output_name
 
-    # 创建目录
-    download_dir.mkdir(parents=True, exist_ok=True)
-    project_dir.mkdir(parents=True, exist_ok=True)
-    report_dir.mkdir(parents=True, exist_ok=True)
-
     # 配置下载选项
     config = DOWNLOAD_CONFIG.copy()
     config.update(BROWSER_CONFIG)
@@ -119,17 +115,25 @@ def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai
     config['headless'] = headless
     config['wait_for_confirmation'] = confirm
     config['chrome_mode'] = chrome_mode
+
+    # 如果用户指定了 --use-browser-data，启用浏览器数据共享
+    if use_browser_data:
+        config['use_system_chrome'] = True
+
     if chrome_data_dir:
         config['chrome_data_dir'] = chrome_data_dir
 
     # 显示配置提示
-    if config.get('use_system_chrome', True):
+    if config.get('use_system_chrome', False):
         mode_desc = {
             'system': '系统完整数据（需关闭所有 Chrome 窗口）',
             'playwright': 'Playwright 专用 Profile（推荐，无需关闭 Chrome）',
             'temp': '临时目录（每次都需要重新登录）'
         }
-        click.echo(f"{Fore.CYAN}[Chrome] 模式: {mode_desc.get(chrome_mode, chrome_mode)}{Style.RESET_ALL}")
+        click.echo(f"{Fore.CYAN}[浏览器] 使用浏览器数据，模式: {mode_desc.get(chrome_mode, chrome_mode)}{Style.RESET_ALL}")
+    else:
+        click.echo(f"{Fore.CYAN}[浏览器] 独立浏览器模式（不共享登录状态）{Style.RESET_ALL}")
+
     if confirm:
         click.echo(f"{Fore.CYAN}[提示] 浏览器将打开目标页面，请确认页面正确后继续{Style.RESET_ALL}")
     click.echo()
@@ -139,9 +143,36 @@ def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai
         click.echo(f"{Fore.YELLOW}[1/4] 下载网站资源...{Style.RESET_ALL}")
         download_report = asyncio.run(download_website(url, download_dir, config))
 
+        # 检查用户是否取消
+        if not download_report:
+            click.echo(f"\n{Fore.YELLOW}[取消] 用户取消了下载操作{Style.RESET_ALL}\n")
+            return
+
+        # 创建项目目录（只在确认下载后创建）
+        project_dir.mkdir(parents=True, exist_ok=True)
+        report_dir.mkdir(parents=True, exist_ok=True)
+
         # 保存下载报告
         save_json(download_report, report_dir / 'download_report.json')
-        click.echo(f"{Fore.GREEN}[OK] 下载完成: {download_report['statistics']['total_files']} 个文件{Style.RESET_ALL}\n")
+
+        # 统计错误类型
+        failed_downloads = download_report.get('failed_downloads', [])
+        critical_errors = [f for f in failed_downloads if f.get('severity') in ('warning', 'error')]
+        skipped_resources = [f for f in failed_downloads if f.get('severity') == 'info']
+
+        # 生成下载报告
+        total_files = download_report['statistics']['total_files']
+        report_parts = [f"下载完成: {total_files} 个文件"]
+
+        if skipped_resources:
+            report_parts.append(f"已跳过 {len(skipped_resources)} 个无效资源")
+
+        if critical_errors:
+            # 只有真正的错误才显示警告
+            click.echo(f"{Fore.YELLOW}[OK] {', '.join(report_parts)}{Style.RESET_ALL}")
+            click.echo(f"{Fore.YELLOW}[!] 警告: {len(critical_errors)} 个资源下载失败{Style.RESET_ALL}\n")
+        else:
+            click.echo(f"{Fore.GREEN}[OK] {', '.join(report_parts)}{Style.RESET_ALL}\n")
 
         # 第二步:检测技术栈
         click.echo(f"{Fore.YELLOW}[2/4] 检测技术栈...{Style.RESET_ALL}")
@@ -261,13 +292,17 @@ def download(url, output):
     click.echo(f"\n{Fore.GREEN}▶ 下载网站: {Fore.CYAN}{url}{Style.RESET_ALL}\n")
 
     output_dir = Path(output)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     config = DOWNLOAD_CONFIG.copy()
     config.update(BROWSER_CONFIG)
 
     try:
         download_report = asyncio.run(download_website(url, output_dir, config))
+
+        # 检查是否取消
+        if not download_report:
+            click.echo(f"\n{Fore.YELLOW}[取消] 用户取消了下载操作{Style.RESET_ALL}\n")
+            return
 
         click.echo(f"\n{Fore.GREEN}[OK] 下载完成!{Style.RESET_ALL}")
         click.echo(f"  - 页面: {download_report['statistics']['pages_downloaded']}")

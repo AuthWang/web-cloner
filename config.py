@@ -20,7 +20,7 @@ BROWSER_CONFIG = {
     "timeout": 30000,  # 30秒超时
     "viewport": {"width": 1920, "height": 1080},
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "use_system_chrome": True,  # 使用系统 Chrome 数据（共享登录状态）
+    "use_system_chrome": False,  # 默认不使用系统 Chrome 数据（独立浏览器模式）
     "chrome_data_dir": None,  # None 表示自动检测系统 Chrome 路径
     "chrome_mode": "playwright",  # Chrome 数据模式: 'system'(需关闭Chrome) / 'playwright'(推荐，独立Profile) / 'temp'(临时)
 }

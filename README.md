@@ -83,6 +83,8 @@ python main.py clone https://example.com
 ```
 
 这将：
+- 使用独立浏览器打开页面（不共享登录状态）
+- 等待用户确认页面正确
 - 下载网站所有资源
 - 移除所有 JavaScript
 - 生成纯静态 HTML+CSS 网站
@@ -102,7 +104,19 @@ python main.py clone https://example.com --keep-ui-interactions
 python main.py clone https://example.com --static-only
 ```
 
-#### 4. 自定义选项
+#### 4. 使用浏览器登录状态
+
+```bash
+# 共享浏览器的登录状态和 Cookies（需要已登录的网站）
+python main.py clone https://example.com --use-browser-data
+```
+
+这将：
+- 使用系统浏览器的数据（Playwright 专用 Profile）
+- 无需重新登录即可下载需要认证的页面
+- 不会影响正在运行的 Chrome 窗口
+
+#### 5. 自定义选项
 
 ```bash
 # 限制爬取深度和页面数
@@ -111,8 +125,11 @@ python main.py clone https://example.com --max-depth 2 --max-pages 20
 # 不下载图片
 python main.py clone https://example.com --no-images
 
-# 显示浏览器窗口
-python main.py clone https://example.com --no-headless
+# 跳过用户确认（自动开始下载）
+python main.py clone https://example.com --no-confirm
+
+# 后台模式（不显示浏览器窗口）
+python main.py clone https://example.com --headless
 ```
 
 ### 其他命令
@@ -168,19 +185,58 @@ web-cloner/
 python main.py clone [OPTIONS] URL
 
 选项:
-  -o, --output TEXT       输出目录名称
-  -d, --max-depth INT     最大爬取深度 [默认: 3]
-  -p, --max-pages INT     最大页面数 [默认: 50]
-  --no-images             不下载图片
-  --no-css                不下载 CSS
-  --no-js                 不下载 JavaScript
-  --static-only           强制生成纯静态项目（仅HTML+CSS，移除所有JS）
-  --enable-ai             启用 AI 辅助分析（实验性）
-  --headless/--no-headless  无头模式 [默认: headless]
-  --confirm/--no-confirm    下载前等待用户确认 [默认: 开启]
-  --chrome-mode           Chrome 数据模式: system/playwright/temp
-  --help                  显示帮助信息
+  -o, --output TEXT           输出目录名称
+  -d, --max-depth INT         最大爬取深度 [默认: 3]
+  -p, --max-pages INT         最大页面数 [默认: 50]
+  --no-images                 不下载图片
+  --no-css                    不下载 CSS
+  --no-js                     不下载 JavaScript
+  --static-only               强制生成纯静态项目（仅HTML+CSS，移除所有JS）
+  --enable-ai                 启用 AI 辅助分析（实验性）
+  --headless/--no-headless    后台模式 [默认: 显示浏览器]
+  --confirm/--no-confirm      下载前等待用户确认 [默认: 开启]
+  --use-browser-data          使用系统浏览器数据（登录状态、Cookies等）
+  --chrome-mode               Chrome 数据模式: system/playwright/temp [默认: playwright]
+  --chrome-data-dir PATH      指定 Chrome 用户数据目录
+  --help                      显示帮助信息
 ```
+
+#### 浏览器模式说明
+
+**默认（独立浏览器）**：
+```bash
+python main.py clone <URL>
+```
+- 独立浏览器实例，不共享任何数据
+- 需要重新登录
+- 类似隐身模式
+
+**使用浏览器数据**：
+```bash
+python main.py clone <URL> --use-browser-data
+```
+- 共享系统浏览器的登录状态
+- 无需重新登录
+- 使用 Playwright 专用 Profile（不影响正在运行的 Chrome）
+
+**Chrome 数据模式**：
+- `playwright`（默认，推荐）：独立 Profile，无需关闭 Chrome
+- `system`：完整系统数据，需关闭所有 Chrome 窗口
+- `temp`：临时目录，每次都需要重新登录
+
+#### 用户确认流程
+
+**默认行为**（开启确认）：
+1. 浏览器打开目标页面
+2. 用户检查页面是否正确（是否已登录、内容完整）
+3. 输入 `y` 确认后开始下载
+4. **直接在已确认的页面开始下载**（不会重新打开页面）
+
+**跳过确认**：
+```bash
+python main.py clone <URL> --no-confirm
+```
+- 自动开始下载，不等待确认
 
 ### `download` 命令
 
@@ -212,9 +268,11 @@ python main.py detect [OPTIONS] DIRECTORY
 ```python
 # 浏览器配置
 BROWSER_CONFIG = {
-    "headless": True,
+    "headless": False,  # 默认显示浏览器窗口
     "timeout": 30000,
-    "viewport": {"width": 1920, "height": 1080}
+    "viewport": {"width": 1920, "height": 1080},
+    "use_system_chrome": False,  # 默认不使用系统浏览器数据（独立模式）
+    "chrome_mode": "playwright",  # playwright/system/temp
 }
 
 # 下载配置
@@ -222,6 +280,7 @@ DOWNLOAD_CONFIG = {
     "max_depth": 3,
     "max_pages": 50,
     "download_images": True,
+    "wait_for_confirmation": True,  # 下载前等待用户确认
     "keep_ui_interactions": False,  # 是否保留UI交互脚本
     # ...
 }
@@ -348,7 +407,17 @@ playwright install chromium
 
 ### 问题: 某些资源下载失败
 
-检查 `download_report.json` 中的 `failed_downloads` 部分，手动下载失败的资源。
+工具已优化错误提示：
+- **404 错误**：自动跳过（常见的失效链接，不影响使用）
+- **二进制文件**：自动识别并跳过（字体文件等）
+- **关键错误**：才会显示警告
+
+检查输出信息：
+```
+[OK] 下载完成: 104 个文件, 已跳过 2 个无效资源
+```
+
+如有关键资源下载失败，可查看 `download_report.json` 中的 `failed_downloads` 部分。
 
 ### 问题: 本地打开HTML样式丢失
 
@@ -364,6 +433,27 @@ python -m http.server 8000
 ### 问题: Chrome 占用端口
 
 使用 `--chrome-mode playwright` 模式（默认），无需关闭 Chrome。
+
+### 问题: 需要登录才能访问的页面
+
+使用 `--use-browser-data` 参数：
+
+```bash
+# 方法1: 先在浏览器中登录，然后运行
+python main.py clone <URL> --use-browser-data
+
+# 方法2: 使用用户确认功能，在打开的浏览器中登录
+python main.py clone <URL> --use-browser-data
+# 等浏览器打开后，手动登录，然后输入 y 确认
+```
+
+### 问题: 输入 y 后页面内容变了
+
+**已修复**：工具会直接在用户确认的页面开始下载，不会重新打开新页面。
+
+### 问题: 输入 n 取消后还是创建了文件夹
+
+**已修复**：输入 n 取消后不会创建任何目录。
 
 ## 🤝 贡献
 

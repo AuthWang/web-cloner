@@ -16,6 +16,49 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def _is_binary_file(file_path: Path, sample_size: int = 512) -> bool:
+    """
+    检测文件是否为二进制文件
+
+    Args:
+        file_path: 文件路径
+        sample_size: 采样大小（字节）
+
+    Returns:
+        True表示二进制文件，False表示文本文件
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            chunk = f.read(sample_size)
+
+        # 空文件视为文本文件
+        if not chunk:
+            return False
+
+        # 检查是否包含NULL字节（二进制文件的典型特征）
+        if b'\x00' in chunk:
+            return True
+
+        # 检查非文本字符的比例
+        # 文本文件通常只包含可打印字符、空白字符和常见控制字符
+        text_characters = (
+            b'\x07\x08\x09\x0a\x0b\x0c\x0d\x1b'  # 控制字符
+            + bytes(range(0x20, 0x7f))  # 可打印ASCII
+            + b'\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f'
+        )
+
+        # 计算非文本字节的数量
+        non_text_bytes = sum(1 for byte in chunk if byte not in text_characters)
+        non_text_ratio = non_text_bytes / len(chunk)
+
+        # 如果超过30%是非文本字符，视为二进制文件
+        return non_text_ratio > 0.3
+
+    except Exception:
+        # 如果检测失败，保守地视为二进制文件
+        return True
+
+
 class ProjectReconstructor:
     """项目重构器 - 将下载的网站转换为可运行的项目"""
 
@@ -228,6 +271,11 @@ class ProjectReconstructor:
         # 检查并复制那些扩展名是 .html 但内容是 CSS 的文件（如字体CSS）
         for html_file in self.source_dir.rglob('*.html'):
             try:
+                # 跳过二进制文件（如字体文件）
+                if _is_binary_file(html_file):
+                    logger.debug(f"跳过二进制文件: {html_file.name}")
+                    continue
+
                 with open(html_file, 'r', encoding='utf-8') as f:
                     content = f.read(200)  # 只读前200字符检查
                 # 如果文件以 @font-face 或其他CSS特征开头，当作CSS处理
@@ -237,8 +285,11 @@ class ProjectReconstructor:
                     dest = self.output_dir / 'css' / css_name
                     shutil.copy2(html_file, dest)
                     logger.info(f"已复制CSS文件(来自.html): {css_name}")
+            except UnicodeDecodeError:
+                # 编码错误说明是二进制文件，跳过即可
+                logger.debug(f"跳过二进制文件 (编码错误): {html_file.name}")
             except Exception as e:
-                logger.debug(f"检查HTML文件是否为CSS失败 {html_file}: {e}")
+                logger.debug(f"检查HTML文件失败 {html_file.name}: {e}")
 
         # 最后处理 HTML 文件（此时所有资源已经复制完成）
         html_files = list(self.source_dir.rglob('*.html'))
@@ -336,6 +387,11 @@ class ProjectReconstructor:
         from bs4 import BeautifulSoup
 
         try:
+            # 跳过二进制文件（如字体文件被误命名为.html）
+            if _is_binary_file(html_file):
+                logger.debug(f"跳过二进制文件: {html_file.name}")
+                return
+
             with open(html_file, 'r', encoding='utf-8') as f:
                 html_content = f.read()
 
@@ -577,8 +633,12 @@ class ProjectReconstructor:
                     # index.html 已存在，跳过这个页面（避免覆盖登录页面）
                     logger.debug(f"跳过: {html_file} (index.html 已存在)")
 
+        except UnicodeDecodeError:
+            # 编码错误说明是二进制文件，跳过即可（不需要警告）
+            logger.debug(f"跳过二进制文件 (编码错误): {html_file.name}")
         except Exception as e:
-            logger.warning(f"处理 HTML 失败 {html_file}: {e}")
+            # 其他真正的错误才显示警告
+            logger.warning(f"处理 HTML 失败 {html_file.name}: {e}")
 
     def _process_css_file(self, css_file: Path, dest: Path) -> None:
         """处理CSS文件，重写CDN url()引用为本地路径"""
