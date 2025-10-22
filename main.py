@@ -26,13 +26,19 @@ from tqdm import tqdm
 # 导入配置
 from config import (
     ensure_directories,
+    validate_config,
     DOWNLOADS_DIR,
     PROJECTS_DIR,
     REPORTS_DIR,
     BROWSER_CONFIG,
     DOWNLOAD_CONFIG,
     AI_CONFIG,
-    LOG_CONFIG
+    LOG_CONFIG,
+    THREAD_CONFIG,
+    PROCESS_CLEANUP_CONFIG,
+    MEMORY_CONFIG,
+    MIDDLEWARE_CONFIG,
+    PERFORMANCE_CONFIG
 )
 
 # 导入核心模块
@@ -82,7 +88,7 @@ def cli():
 @click.option('--headless/--no-headless', default=False, help='无头模式（默认显示浏览器窗口）')
 @click.option('--confirm/--no-confirm', default=True, help='下载前等待用户确认页面（默认开启）')
 @click.option('--chrome-data-dir', default=None, help='指定 Chrome 用户数据目录（默认自动检测）')
-@click.option('--chrome-mode', type=click.Choice(['system', 'playwright', 'temp']), default='playwright', help='Chrome 数据模式: system(需关闭Chrome)/playwright(推荐)/temp(临时)')
+@click.option('--chrome-mode', type=click.Choice(['system', 'playwright']), default='playwright', help='Chrome 数据模式: system(需关闭Chrome)/playwright(项目根目录数据)')
 @click.option('--use-browser-data', is_flag=True, help='使用系统浏览器数据(登录状态、Cookies等)')
 @click.option('--static-only', is_flag=True, help='强制生成纯静态项目(仅HTML+CSS,移除所有JS)')
 def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai, headless, confirm, chrome_data_dir, chrome_mode, use_browser_data, static_only):
@@ -104,6 +110,13 @@ def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai
     project_dir = PROJECTS_DIR / output_name
     report_dir = REPORTS_DIR / output_name
 
+    # 验证配置
+    try:
+        validate_config()
+    except ValueError as e:
+        click.echo(f"\n{Fore.RED}[ERROR] 配置验证失败: {e}{Style.RESET_ALL}\n")
+        sys.exit(1)
+
     # 配置下载选项
     config = DOWNLOAD_CONFIG.copy()
     config.update(BROWSER_CONFIG)
@@ -116,9 +129,21 @@ def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai
     config['wait_for_confirmation'] = confirm
     config['chrome_mode'] = chrome_mode
 
-    # 如果用户指定了 --use-browser-data，启用浏览器数据共享
+    # 添加新的管理配置
+    config['thread'] = THREAD_CONFIG.copy()
+    config['process_cleanup'] = PROCESS_CLEANUP_CONFIG.copy()
+    config['memory'] = MEMORY_CONFIG.copy()
+    config['middleware'] = MIDDLEWARE_CONFIG.copy()
+    config['performance'] = PERFORMANCE_CONFIG.copy()
+
+    # 浏览器数据共享逻辑
     if use_browser_data:
+        # 用户明确指定使用浏览器数据
         config['use_system_chrome'] = True
+    elif chrome_mode == 'playwright':
+        # playwright模式默认启用浏览器数据保存（保存到项目browser-data目录）
+        config['use_system_chrome'] = True
+    # 其他情况（system模式没有指定--use-browser-data）保持独立模式
 
     if chrome_data_dir:
         config['chrome_data_dir'] = chrome_data_dir
@@ -127,12 +152,19 @@ def clone(url, output, max_depth, max_pages, no_images, no_css, no_js, enable_ai
     if config.get('use_system_chrome', False):
         mode_desc = {
             'system': '系统完整数据（需关闭所有 Chrome 窗口）',
-            'playwright': 'Playwright 专用 Profile（推荐，无需关闭 Chrome）',
-            'temp': '临时目录（每次都需要重新登录）'
+            'playwright': 'Playwright模式(项目根目录数据)',
         }
-        click.echo(f"{Fore.CYAN}[浏览器] 使用浏览器数据，模式: {mode_desc.get(chrome_mode, chrome_mode)}{Style.RESET_ALL}")
+        if chrome_mode == 'playwright':
+            click.echo(f"{Fore.GREEN}[浏览器] 登录状态将保存到项目目录，模式: {mode_desc.get(chrome_mode, chrome_mode)}{Style.RESET_ALL}")
+            click.echo(f"{Fore.CYAN}[提示] 您的登录状态和Cookies将保存到 ./browser-data/ 供下次使用{Style.RESET_ALL}")
+        else:
+            click.echo(f"{Fore.CYAN}[浏览器] 使用浏览器数据，模式: {mode_desc.get(chrome_mode, chrome_mode)}{Style.RESET_ALL}")
     else:
-        click.echo(f"{Fore.CYAN}[浏览器] 独立浏览器模式（不共享登录状态）{Style.RESET_ALL}")
+        click.echo(f"{Fore.YELLOW}[浏览器] 独立浏览器模式（登录状态不会保存）{Style.RESET_ALL}")
+        if chrome_mode == 'system':
+            click.echo(f"{Fore.CYAN}[提示] 如需保存登录状态，请添加 --use-browser-data 参数{Style.RESET_ALL}")
+        else:
+            click.echo(f"{Fore.CYAN}[提示] playwright模式会自动保存登录状态，无需额外参数{Style.RESET_ALL}")
 
     if confirm:
         click.echo(f"{Fore.CYAN}[提示] 浏览器将打开目标页面，请确认页面正确后继续{Style.RESET_ALL}")

@@ -49,10 +49,17 @@ reports/
 .chrome-playwright-data/
 playwright-report/
 test-results/
+browser-data
 
 # OS
 .DS_Store
 Thumbs.db
+
+# 备份文件
+*.backup
+*.backup2
+*.bak
+*.tmp
 
 # 傻逼claude会创建的文件
 nul
